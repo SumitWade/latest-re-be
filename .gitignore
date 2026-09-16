@@ -1,0 +1,20 @@
+# logs
+logs
+*.log
+*.log.gz
+
+#ignore EXEMP
+/EXEMP
+EXEMP
+
+#ignore env
+.env
+
+#ignore public folder
+/public
+
+#Dependency
+/node_modules
+
+# Stores VSCode versions used for testing VSCode extensions
+.vscode-test

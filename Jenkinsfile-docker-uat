@@ -1,0 +1,152 @@
+pipeline {
+    agent any
+
+    environment {
+        APP_NAME            = 'new-re-be'
+        EMAIL_RECIPIENTS    = 'aiits.aws@gmail.com'
+        DEPLOY_SERVER       = '103.220.82.181'
+        SSH_CREDENTIALS_ID  = 'backup-server'
+        SSH_USER            = 'aiits'
+
+        REMOTE_PATH         = '/CICD_Deployments/uat/new-re-be'
+        IMAGE_NAME          = "${APP_NAME}"
+        IMAGE_FILENAME      = "${APP_NAME}-${BUILD_NUMBER}.tar.gz"
+        IMAGE_TAR           = "/mnt/${IMAGE_FILENAME}"
+
+        CONTAINER_PORT      = '3044'
+        HOST_PORT           = '3044'
+    }
+
+    stages {
+
+        stage('Clean Workspace') {
+            steps {
+                cleanWs()
+            }
+        }
+
+        stage('Start Build Notification') {
+            steps {
+                emailext(
+                    subject: "${JOB_NAME} - Build #${BUILD_NUMBER} - Started",
+                    body: "Build #${BUILD_NUMBER} has started.\n\nConsole: ${BUILD_URL}",
+                    to: EMAIL_RECIPIENTS,
+                    from: 'aiits.aws@gmail.com'
+                )
+            }
+        }
+
+        stage('Checkout Source Code') {
+            steps {
+                git credentialsId: 'git',
+                    url: 'https://github.com/AIITS/real-estate-updated-BE.git',
+                    branch: 'uat'
+            }
+        }
+
+        stage('Prepare Environment & Build Docker Image') {
+            steps {
+                withCredentials([file(credentialsId: 're-be-new', variable: 'ENV_FILE')]) {
+                    sh '''
+                            cp $ENV_FILE .env
+                            mkdir -p pages
+                            mkdir -p public
+                        '''
+                    
+                }
+
+                sh """
+                    echo "Building Docker image ${IMAGE_NAME}:${BUILD_NUMBER}"
+                    docker build -t ${IMAGE_NAME}:${BUILD_NUMBER} .
+                """
+            }
+        }
+
+        stage('Save and Compress Docker Image') {
+            steps {
+                sh """
+                    docker save ${IMAGE_NAME}:${BUILD_NUMBER} -o ${APP_NAME}-${BUILD_NUMBER}.tar
+                    gzip ${APP_NAME}-${BUILD_NUMBER}.tar
+                    ls -lh ${IMAGE_FILENAME}
+                """
+            }
+        }
+
+        stage('Upload Image to Remote Server') {
+            steps {
+                sshagent([SSH_CREDENTIALS_ID]) {
+                    sh """
+                        scp -o StrictHostKeyChecking=no \
+                        ${IMAGE_FILENAME} \
+                        ${SSH_USER}@${DEPLOY_SERVER}:/mnt/
+                    """
+                }
+            }
+        }
+
+        stage('Deploy on Remote Server') {
+            steps {
+                sshagent([SSH_CREDENTIALS_ID]) {
+                    sh """
+ssh -o StrictHostKeyChecking=no ${SSH_USER}@${DEPLOY_SERVER} <<EOF
+set -e
+
+mkdir -p ${REMOTE_PATH}
+cd ${REMOTE_PATH}
+
+if [ ! -f ${IMAGE_TAR} ]; then
+  echo "ERROR: Docker image not found"
+  exit 1
+fi
+
+echo "Loading Docker image"
+gunzip -c ${IMAGE_TAR} > ${APP_NAME}-${BUILD_NUMBER}.tar
+docker load -i ${APP_NAME}-${BUILD_NUMBER}.tar
+
+rm -f ${APP_NAME}-${BUILD_NUMBER}.tar ${IMAGE_TAR}
+
+if docker ps -a --format '{{.Names}}' | grep -w ${APP_NAME}; then
+  docker rm -f ${APP_NAME}
+fi
+
+docker run -d \
+  --name ${APP_NAME} \
+  -p ${HOST_PORT}:${CONTAINER_PORT} \
+  -v re-be-new:/app/public \
+  --restart always \
+  ${IMAGE_NAME}:${BUILD_NUMBER}
+
+docker ps --filter name=${APP_NAME}
+EOF
+"""
+                }
+            }
+        }
+
+        stage('Deployment Verification') {
+            steps {
+                echo "Deployment completed successfully on ${DEPLOY_SERVER}"
+            }
+        }
+    }
+
+    post {
+        success {
+            emailext(
+                subject: "${JOB_NAME} - Build #${BUILD_NUMBER} - SUCCESS",
+                body: "Build and deployment completed successfully on ${DEPLOY_SERVER}.",
+                to: EMAIL_RECIPIENTS,
+                from: 'aiits.aws@gmail.com'
+            )
+        }
+
+        failure {
+            emailext(
+                subject: "${JOB_NAME} - Build #${BUILD_NUMBER} - FAILED",
+                body: "Build or deployment failed.\n\nCheck console: ${BUILD_URL}",
+                to: EMAIL_RECIPIENTS,
+                from: 'aiits.aws@gmail.com'
+            )
+        }
+    }
+}
